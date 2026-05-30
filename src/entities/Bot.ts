@@ -5,7 +5,7 @@ import type { TeamId } from '../core/Config';
 import { BOT, DIFFICULTY, type DifficultyId } from '../core/Config';
 import { Settings } from '../core/Settings';
 import { Audio } from '../core/AudioSynth';
-import { angleDelta, clamp, gaussian, randRange, choice } from '../core/MathUtils';
+import { angleDelta, clamp, gaussian, randRange } from '../core/MathUtils';
 import { SITE_A, SITE_B } from '../world/Layout';
 
 export type BotRole = 'entry' | 'support' | 'sniper' | 'defender';
@@ -37,9 +37,9 @@ export class Bot extends Character {
   assignedSite: 'A' | 'B';
   state: BotState = 'Idle';
 
-  private legL: THREE.Mesh;
-  private legR: THREE.Mesh;
-  private armR: THREE.Mesh;
+  private legL: THREE.Object3D;
+  private legR: THREE.Object3D;
+  private armR: THREE.Object3D;
   private walkPhase = 0;
 
   // navigation
@@ -63,6 +63,10 @@ export class Bot extends Character {
   private strafeTimer = 0;
   private viewRange = 34;
   private fovCos = Math.cos((100 * Math.PI) / 180 / 2);
+  // recoil / burst discipline so bots are not laser-accurate
+  private sprayBloom = 0;
+  private burstLeft = 0;
+  private burstPause = 0;
 
   constructor(world: IGameWorld, team: TeamId, name: string, role: BotRole, site: 'A' | 'B') {
     super(world, team, name, BOT.radius, BOT.height, BOT.eyeHeight);
@@ -100,6 +104,9 @@ export class Bot extends Character {
     this.destination = null;
     this.repathTimer = 0;
     this.reactionTimer = 0;
+    this.sprayBloom = 0;
+    this.burstLeft = 0;
+    this.burstPause = 0;
     if (this.mesh) this.mesh.visible = true;
   }
 
@@ -261,7 +268,7 @@ export class Bot extends Character {
     const t = this.target;
     if (!t || !t.alive) return;
 
-    // aim at target center with difficulty-scaled error
+    // aim at target center with difficulty-scaled tracking error
     t.centerMass(_toT);
     const dist = this.position.distanceTo(t.position);
     _toT.x += this.aimJitter.x * (1 + dist * 0.02);
@@ -274,70 +281,121 @@ export class Bot extends Character {
     const horiz = Math.hypot(_aim.x, _aim.z);
     const desiredPitch = Math.atan2(_aim.y, horiz);
 
-    const turn = (6 + this.diff.aggression * 4) * dt;
+    // slower turn so bots can't instantly snap onto a target
+    const turn = (3.2 + this.diff.aggression * 3) * dt;
     this.yaw += clamp(angleDelta(this.yaw, desiredYaw), -turn, turn);
     this.pitch += clamp(angleDelta(this.pitch, desiredPitch), -turn, turn);
 
-    // weapon management: pistol fallback while rifle reloads
     this.manageWeapon();
-
     const w = this.weapon;
     w.update(dt);
 
+    // recover spray bloom / burst pause when not actively firing
+    this.burstPause -= dt;
+
     if (this.reactionTimer > 0) {
       this.reactionTimer -= dt;
+      this.sprayBloom = Math.max(0, this.sprayBloom - dt * 0.4);
       return;
     }
 
-    // only fire when roughly on target and has clear LOS
     this.aimForward(_fwd);
     _aim.normalize();
-    const onTarget = _fwd.dot(_aim) > 0.992;
+    const onTarget = _fwd.dot(_aim) > 0.985;
     const losClear = this.world.collision.lineOfSight(_eye, t.centerMass(new THREE.Vector3()));
+
+    if (!(onTarget && losClear) || w.isMelee) {
+      // not shooting this frame -> recover accuracy
+      this.sprayBloom = Math.max(0, this.sprayBloom - dt * 5);
+      if (!losClear) return;
+    }
+
+    if (this.burstPause > 0) {
+      this.sprayBloom = Math.max(0, this.sprayBloom - dt * 5);
+      return;
+    }
 
     if (onTarget && losClear) {
       if (w.needsReload) {
         w.startReload();
-      } else {
-        const out = w.tryFire(true, false);
-        if (out.fired) this.fireShot(t);
+        return;
+      }
+      if (this.burstLeft <= 0) this.burstLeft = this.burstSize(dist, w.def.automatic);
+      const out = w.tryFire(true, false);
+      if (out.fired) {
+        this.fireShot(t);
+        this.sprayBloom = Math.min(0.12, this.sprayBloom + 0.016);
+        this.burstLeft--;
+        if (this.burstLeft <= 0) {
+          // pause between bursts (longer for easier bots) and let aim settle
+          this.burstPause = randRange(0.25, 0.5) + (1 - this.diff.fireRateScale) * 0.5;
+          this.sprayBloom *= 0.25;
+        }
       }
     }
   }
 
+  private burstSize(dist: number, automatic: boolean): number {
+    if (!automatic) return 1; // semi-auto: one trigger pull at a time
+    if (dist > 22) return 1 + Math.floor(randRange(0, 2)); // tap at range
+    if (dist > 11) return 3 + Math.floor(randRange(0, 2));
+    return 6 + Math.floor(randRange(0, 4)); // hose up close
+  }
+
   private manageWeapon() {
-    const rifle = this.weapons[0];
-    const pistol = this.weapons[1];
-    if (this.weaponIndex === 0 && rifle.reloading && pistol.ammo > 0) {
-      this.switchTo(1);
-    } else if (this.weaponIndex === 1 && !rifle.reloading && rifle.ammo > 0) {
-      this.switchTo(0);
+    // pick the first ready (non-melee, has ammo) weapon; fall back to knife
+    const cur = this.weapon;
+    if (cur && !cur.isMelee && cur.ammo > 0 && !cur.reloading) return;
+    let bestIdx = -1;
+    for (let i = 0; i < this.weapons.length; i++) {
+      const w = this.weapons[i];
+      if (!w.isMelee && w.ammo > 0 && !w.reloading) {
+        bestIdx = i;
+        break;
+      }
     }
+    if (bestIdx >= 0) {
+      if (bestIdx !== this.weaponIndex) this.switchTo(bestIdx);
+    } else {
+      // nothing loaded: start reloading the primary and switch to knife to fight
+      const primary = this.weapons.find((w) => !w.isMelee && w.reserve > 0 && w.ammo <= 0);
+      if (primary) primary.startReload();
+      this.switchTo(this.weapons.length - 1);
+    }
+  }
+
+  private playShootAudio(type: string, dist: number) {
+    if (type === 'shotgun') Audio.shootShotgun(dist);
+    else if (type === 'sniper') Audio.shootSniper(dist);
+    else if (type === 'pistol') Audio.shootPistol(dist);
+    else Audio.shootRifle(dist);
   }
 
   private fireShot(t: Character) {
     const def = this.weapon.def;
     this.eyePosition(_eye);
-    // direction with a touch of extra spread based on difficulty
-    t.centerMass(_aim).sub(_eye).normalize();
-    const err = this.diff.aimError;
-    _aim.x += gaussian() * err;
-    _aim.y += gaussian() * err * 0.6;
-    _aim.z += gaussian() * err;
-    _aim.normalize();
-
-    const res = this.world.fireBullet(_eye, _aim, this, def);
-
-    _muzzle.copy(_eye).addScaledVector(_aim, 0.5);
     const distToListener = this.position.distanceTo(this.world.listenerPos);
-    if (def.type !== 'knife') {
+    const baseDir = t.centerMass(new THREE.Vector3()).sub(_eye).normalize();
+    const dist = this.position.distanceTo(t.position);
+    // total inaccuracy = difficulty error + spray bloom, scaled by range
+    const err = (this.diff.aimError + this.sprayBloom) * (1 + dist * 0.012);
+    const pellets = def.pellets ?? 1;
+
+    for (let i = 0; i < pellets; i++) {
+      _aim.copy(baseDir);
+      _aim.x += gaussian() * err;
+      _aim.y += gaussian() * err * 0.7;
+      _aim.z += gaussian() * err;
+      _aim.normalize();
+      const res = this.world.fireBullet(_eye, _aim, this, def);
+      _muzzle.copy(_eye).addScaledVector(_aim, 0.5);
       this.world.fx.spawnTracer(_muzzle, res.point);
-      this.world.fx.spawnMuzzleFlash(_muzzle, _aim);
-      if (def.type === 'rifle') Audio.shootRifle(distToListener);
-      else Audio.shootPistol(distToListener);
+      if (res.hitCharacter) this.world.fx.spawnBlood(res.point, res.normal);
+      else if (res.hitWorld) this.world.fx.spawnImpact(res.point, res.normal);
     }
-    if (res.hitCharacter) this.world.fx.spawnBlood(res.point, res.normal);
-    else if (res.hitWorld) this.world.fx.spawnImpact(res.point, res.normal);
+    _muzzle.copy(_eye).addScaledVector(baseDir, 0.5);
+    this.world.fx.spawnMuzzleFlash(_muzzle, baseDir);
+    this.playShootAudio(def.type, distToListener);
   }
 
   // ----------------------------------------------------------------- movement
@@ -386,6 +444,24 @@ export class Bot extends Character {
   // ------------------------------------------------------------------- update
   update(dt: number) {
     if (!this.alive) return;
+
+    // Bots stand down outside the live phase (buy phase / round end).
+    if (!this.world.roundLive) {
+      this.velocity.x = 0;
+      this.velocity.z = 0;
+      this.velocity.y -= 18 * dt;
+      this.grounded = this.world.collision.moveCharacter(
+        this.position,
+        this.velocity,
+        this.radius,
+        this.height,
+        dt
+      );
+      this.legL.rotation.x *= 0.8;
+      this.legR.rotation.x *= 0.8;
+      this.syncMesh();
+      return;
+    }
 
     this.thinkTimer -= dt;
     if (this.thinkTimer <= 0) {

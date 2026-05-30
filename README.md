@@ -47,6 +47,22 @@ npm run preview  # serve the production build
 | Scoreboard | `Tab` |
 | Pause | `Esc` |
 
+## Match flow
+
+Each round starts with a **15-second buy phase** (the *Armory*). The cursor is
+freed so you can click weapons to buy them; press **Deploy** to skip the timer
+and lock in. Money carries between rounds (+ rewards for wins/losses/kills), so
+round 1 is a pistol round and you tech up from there. Weapons you buy carry to
+the next round; the **Click-9** pistol and **Bonk Knife** are always free.
+
+### Weapons
+- **Spray-47** — assault rifle (all-rounder)
+- **Buzz-9** — fast SMG, cheap
+- **Thumper-12** — pump shotgun (9 pellets, lethal up close)
+- **LongScope-X** — sniper (one-shot body, hard zoom, inaccurate unscoped)
+- **Click-9** — free pistol · **Hand-Cannon** — heavy pistol
+- **Bonk Knife** — melee
+
 ---
 
 ## Architecture

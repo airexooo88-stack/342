@@ -3,7 +3,7 @@ import type { TeamId } from '../core/Config';
 import { HITZONE } from '../core/Config';
 import type { IGameWorld, HitboxSet } from '../core/Types';
 import { Weapon } from '../weapons/Weapon';
-import { WEAPON_DEFS, LOADOUT_ORDER } from '../weapons/WeaponDefs';
+import { WEAPON_DEFS, KNIFE_ID, DEFAULT_SECONDARY } from '../weapons/WeaponDefs';
 
 let CHAR_ID = 0;
 
@@ -42,6 +42,10 @@ export abstract class Character {
   weapons: Weapon[] = [];
   weaponIndex = 0;
 
+  // current loadout (ids). primaryId may be null (pistol + knife only).
+  primaryId: string | null = 'spray47';
+  secondaryId: string = DEFAULT_SECONDARY;
+
   mesh: THREE.Group | null = null;
 
   constructor(world: IGameWorld, team: TeamId, name: string, radius: number, height: number, eye: number) {
@@ -51,11 +55,23 @@ export abstract class Character {
     this.radius = radius;
     this.height = this.standHeight = height;
     this.eyeHeight = this.standEye = eye;
-    this.weapons = LOADOUT_ORDER.map((id) => new Weapon(WEAPON_DEFS[id]));
+    this.setLoadout(this.primaryId, this.secondaryId);
   }
 
   get weapon(): Weapon {
-    return this.weapons[this.weaponIndex];
+    return this.weapons[Math.min(this.weaponIndex, this.weapons.length - 1)];
+  }
+
+  /** Rebuild the held weapons from a loadout. primary may be null. */
+  setLoadout(primaryId: string | null, secondaryId: string) {
+    this.primaryId = primaryId;
+    this.secondaryId = secondaryId;
+    const list: Weapon[] = [];
+    if (primaryId && WEAPON_DEFS[primaryId]) list.push(new Weapon(WEAPON_DEFS[primaryId]));
+    list.push(new Weapon(WEAPON_DEFS[secondaryId] ?? WEAPON_DEFS[DEFAULT_SECONDARY]));
+    list.push(new Weapon(WEAPON_DEFS[KNIFE_ID]));
+    this.weapons = list;
+    this.weaponIndex = 0; // primary if present, else the secondary
   }
 
   switchTo(index: number) {
@@ -157,10 +173,10 @@ export abstract class Character {
     this.velocity.set(0, 0, 0);
     this.yaw = yaw;
     this.pitch = 0;
-    this.weaponIndex = 0;
     this.height = this.standHeight;
     this.eyeHeight = this.standEye;
-    for (const w of this.weapons) w.resetForRound();
+    // rebuild loadout (fresh ammo) from current selection
+    this.setLoadout(this.primaryId, this.secondaryId);
     if (this.mesh) this.mesh.visible = true;
   }
 
@@ -169,73 +185,91 @@ export abstract class Character {
 
 /**
  * Builds a stylised low-poly humanoid out of primitives, tinted by team.
- * Returns the group plus references for simple walk animation.
+ * Limbs use pivot groups (hip/shoulder) so walk + aim animation reads well.
  */
 export function buildBotMesh(team: TeamId): {
   group: THREE.Group;
-  legL: THREE.Mesh;
-  legR: THREE.Mesh;
-  armR: THREE.Mesh;
+  legL: THREE.Object3D;
+  legR: THREE.Object3D;
+  armR: THREE.Object3D;
 } {
   const group = new THREE.Group();
-  const bodyColor = team === 'crew' ? 0xb88a1f : 0x2f6da8;
+  const bodyColor = team === 'crew' ? 0x9c7420 : 0x2b5f93;
+  const suit = team === 'crew' ? 0x2a2620 : 0x1f2733;
   const accent = team === 'crew' ? 0xffd23f : 0x4fb0ff;
 
-  const matBody = new THREE.MeshStandardMaterial({ color: bodyColor, roughness: 0.7, metalness: 0.2 });
+  const matBody = new THREE.MeshStandardMaterial({ color: bodyColor, roughness: 0.65, metalness: 0.25 });
+  const matSuit = new THREE.MeshStandardMaterial({ color: suit, roughness: 0.85, metalness: 0.15 });
   const matAccent = new THREE.MeshStandardMaterial({
     color: accent,
     emissive: accent,
-    emissiveIntensity: 0.35,
+    emissiveIntensity: 0.4,
     roughness: 0.5,
   });
-  const matDark = new THREE.MeshStandardMaterial({ color: 0x1c2029, roughness: 0.8 });
+  const matDark = new THREE.MeshStandardMaterial({ color: 0x14171d, roughness: 0.8 });
+  const matMetal = new THREE.MeshStandardMaterial({ color: 0x6a7488, roughness: 0.4, metalness: 0.7 });
 
-  // torso
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.7, 0.32), matBody);
-  torso.position.y = 1.12;
-  torso.castShadow = true;
-  group.add(torso);
+  const add = (parent: THREE.Object3D, geo: THREE.BufferGeometry, mat: THREE.Material, x: number, y: number, z: number) => {
+    const m = new THREE.Mesh(geo, mat);
+    m.position.set(x, y, z);
+    m.castShadow = true;
+    parent.add(m);
+    return m;
+  };
 
-  // chest accent stripe
-  const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.12, 0.34), matAccent);
-  stripe.position.y = 1.28;
-  group.add(stripe);
+  // hips / pelvis
+  add(group, new THREE.BoxGeometry(0.46, 0.26, 0.3), matSuit, 0, 0.92, 0);
+  // torso (tapered with a chest plate)
+  add(group, new THREE.BoxGeometry(0.58, 0.55, 0.32), matBody, 0, 1.32, 0);
+  add(group, new THREE.BoxGeometry(0.5, 0.34, 0.36), matSuit, 0, 1.5, 0.02);
+  // chest accent + shoulder lights
+  add(group, new THREE.BoxGeometry(0.16, 0.16, 0.38), matAccent, 0, 1.46, 0.02);
+  add(group, new THREE.BoxGeometry(0.62, 0.08, 0.34), matAccent, 0, 1.62, 0);
+  // backpack
+  add(group, new THREE.BoxGeometry(0.4, 0.42, 0.18), matDark, 0, 1.34, -0.24);
 
-  // head + visor
-  const head = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.34, 0.34), matDark);
-  head.position.y = 1.66;
-  head.castShadow = true;
-  group.add(head);
-  const visor = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.1, 0.04), matAccent);
-  visor.position.set(0, 1.68, 0.17);
-  group.add(visor);
+  // neck + head + visor + antenna
+  add(group, new THREE.CylinderGeometry(0.08, 0.1, 0.12, 8), matSuit, 0, 1.74, 0);
+  add(group, new THREE.BoxGeometry(0.32, 0.34, 0.34), matDark, 0, 1.94, 0);
+  add(group, new THREE.BoxGeometry(0.34, 0.1, 0.04), matAccent, 0, 1.96, 0.16);
+  const antenna = add(group, new THREE.CylinderGeometry(0.012, 0.012, 0.22, 6), matMetal, 0.12, 2.18, -0.08);
+  add(antenna, new THREE.SphereGeometry(0.025, 6, 6), matAccent, 0, 0.12, 0);
 
-  // arms
-  const armGeo = new THREE.BoxGeometry(0.16, 0.6, 0.16);
-  const armL = new THREE.Mesh(armGeo, matBody);
-  armL.position.set(-0.4, 1.12, 0);
-  armL.castShadow = true;
+  // ---- left arm (pivot at shoulder) ----
+  const armL = new THREE.Group();
+  armL.position.set(-0.36, 1.56, 0.02);
   group.add(armL);
-  const armR = new THREE.Mesh(armGeo, matBody);
-  armR.position.set(0.4, 1.12, 0.06);
-  armR.castShadow = true;
+  add(armL, new THREE.BoxGeometry(0.16, 0.34, 0.16), matBody, 0, -0.17, 0);
+  add(armL, new THREE.BoxGeometry(0.14, 0.32, 0.14), matSuit, 0, -0.46, 0.04);
+  add(armL, new THREE.BoxGeometry(0.13, 0.13, 0.13), matDark, 0, -0.62, 0.08); // hand
+
+  // ---- right arm (pivot at shoulder) holds the gun ----
+  const armR = new THREE.Group();
+  armR.position.set(0.36, 1.56, 0.08);
   group.add(armR);
+  add(armR, new THREE.BoxGeometry(0.16, 0.34, 0.16), matBody, 0, -0.17, 0);
+  add(armR, new THREE.BoxGeometry(0.14, 0.3, 0.14), matSuit, 0, -0.42, 0.1);
+  add(armR, new THREE.BoxGeometry(0.13, 0.13, 0.13), matDark, 0, -0.54, 0.2); // hand
+  // a stubby rifle in the hands
+  const gun = new THREE.Group();
+  gun.position.set(0, -0.5, 0.28);
+  armR.add(gun);
+  add(gun, new THREE.BoxGeometry(0.1, 0.12, 0.46), matDark, 0, 0, 0);
+  add(gun, new THREE.CylinderGeometry(0.02, 0.02, 0.3, 8), matMetal, 0, 0.02, 0.34).rotation.x = Math.PI / 2;
+  add(gun, new THREE.BoxGeometry(0.06, 0.16, 0.08), matDark, 0, -0.12, -0.06);
 
-  // a stubby gun in the right hand so bots read as armed
-  const gun = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.12, 0.5), matDark);
-  gun.position.set(0.42, 1.0, 0.32);
-  group.add(gun);
-
-  // legs
-  const legGeo = new THREE.BoxGeometry(0.2, 0.78, 0.22);
-  const legL = new THREE.Mesh(legGeo, matDark);
-  legL.position.set(-0.16, 0.4, 0);
-  legL.castShadow = true;
-  group.add(legL);
-  const legR = new THREE.Mesh(legGeo, matDark);
-  legR.position.set(0.16, 0.4, 0);
-  legR.castShadow = true;
-  group.add(legR);
+  // ---- legs (pivot at hip) ----
+  const makeLeg = (side: number) => {
+    const leg = new THREE.Group();
+    leg.position.set(side * 0.14, 0.84, 0);
+    group.add(leg);
+    add(leg, new THREE.BoxGeometry(0.2, 0.42, 0.22), matSuit, 0, -0.22, 0); // thigh
+    add(leg, new THREE.BoxGeometry(0.17, 0.4, 0.19), matBody, 0, -0.62, 0.01); // shin
+    add(leg, new THREE.BoxGeometry(0.2, 0.12, 0.3), matDark, 0, -0.82, 0.05); // boot
+    return leg;
+  };
+  const legL = makeLeg(-1);
+  const legR = makeLeg(1);
 
   return { group, legL, legR, armR };
 }

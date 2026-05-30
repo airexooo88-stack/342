@@ -3,12 +3,15 @@ import { GAME, TEAM_NAME } from '../core/Config';
 import { Settings, type GraphicsQuality } from '../core/Settings';
 import { Audio } from '../core/AudioSynth';
 import type { DifficultyId } from '../core/Config';
+import { WEAPON_DEFS, BUY_PRIMARIES, BUY_SECONDARIES } from '../weapons/WeaponDefs';
 
 export interface UIHandlers {
   onPlay: () => void;
   onResume: () => void;
   onQuitToMenu: () => void;
   onRestart: () => void;
+  onBuy: (weaponId: string) => void;
+  onDeploy: () => void;
 }
 
 export interface HUDState {
@@ -20,6 +23,9 @@ export interface HUDState {
   isMelee: boolean;
   reloading: boolean;
   slot: 1 | 2 | 3;
+  primaryName: string;
+  secondaryName: string;
+  money: number;
   crewScore: number;
   guardScore: number;
   crewAlive: number;
@@ -87,6 +93,7 @@ export class UI {
       ${this.loadingHTML()}
       ${this.menuHTML()}
       ${this.hudHTML()}
+      ${this.buyMenuHTML()}
       ${this.scoreboardHTML()}
       ${this.pauseHTML()}
       ${this.gameoverHTML()}
@@ -155,6 +162,7 @@ export class UI {
           <button data-v="low" class="${s.graphics === 'low' ? 'active' : ''}">Low</button>
           <button data-v="medium" class="${s.graphics === 'medium' ? 'active' : ''}">Medium</button>
           <button data-v="high" class="${s.graphics === 'high' ? 'active' : ''}">High</button>
+          <button data-v="ultra" class="${s.graphics === 'ultra' ? 'active' : ''}">Ultra</button>
         </div>
       </div>
       <div class="field">
@@ -222,7 +230,7 @@ export class UI {
         </div>
         <div class="hud-timer" id="hud-timer">
           <div class="t" id="timer-text">1:35</div>
-          <div class="phase" id="phase-text">FREEZE</div>
+          <div class="phase" id="phase-text">BUY</div>
         </div>
         <div class="hud-team-score guard">
           <div><div class="name">Null Guards</div><div class="alive" id="guard-alive">5 alive</div></div>
@@ -248,12 +256,13 @@ export class UI {
       </div>
 
       <div class="hud-ammo">
+        <div class="hud-money">$<span id="hud-money">0</span></div>
         <div class="wname" id="weap-name">Spray-47</div>
         <div class="count"><span class="mag" id="ammo-mag">30</span><span class="reserve" id="ammo-res"> / 90</span></div>
         <div class="hud-slots">
-          <div class="slot" data-slot="1" id="slot-1">1 Spray</div>
-          <div class="slot" data-slot="2" id="slot-2">2 Click</div>
-          <div class="slot" data-slot="3" id="slot-3">3 Bonk</div>
+          <div class="slot" data-slot="1" id="slot-1">1 —</div>
+          <div class="slot" data-slot="2" id="slot-2">2 Click-9</div>
+          <div class="slot" data-slot="3" id="slot-3">3 Knife</div>
         </div>
       </div>
 
@@ -322,6 +331,47 @@ export class UI {
     </div>`;
   }
 
+  private buyCard(id: string) {
+    const d = WEAPON_DEFS[id];
+    const dmg = d.pellets ? `${d.damage}×${d.pellets}` : `${d.damage}`;
+    return `
+      <button class="buy-item" data-id="${id}">
+        <div class="bi-top"><span class="bi-name">${d.name}</span><span class="bi-price">${d.price > 0 ? '$' + d.price : 'FREE'}</span></div>
+        <div class="bi-cat">${d.category}</div>
+        <div class="bi-stats">DMG ${dmg} · RPM ${d.rpm} · MAG ${d.magazine || '∞'}</div>
+        <div class="bi-owned">EQUIPPED</div>
+      </button>`;
+  }
+
+  private buyMenuHTML() {
+    return `
+    <div id="buymenu" class="overlay hidden">
+      <div class="buy-card">
+        <div class="buy-head">
+          <div class="buy-title">ARMORY <span>— gear up before deployment</span></div>
+          <div class="buy-meta">
+            <span class="buy-money">$<b id="buy-money">0</b></span>
+            <span class="buy-timer">Auto-deploy in <b id="buy-timer">15</b>s</span>
+          </div>
+        </div>
+        <div class="buy-cols">
+          <div class="buy-col">
+            <h4>Primary</h4>
+            <div class="buy-grid" id="buy-primaries">${BUY_PRIMARIES.map((id) => this.buyCard(id)).join('')}</div>
+          </div>
+          <div class="buy-col">
+            <h4>Secondary</h4>
+            <div class="buy-grid" id="buy-secondaries">${BUY_SECONDARIES.map((id) => this.buyCard(id)).join('')}</div>
+          </div>
+        </div>
+        <div class="buy-foot">
+          <div class="buy-hint">Click an item to buy · weapons carry to next round · Click-9 &amp; Bonk Knife are free</div>
+          <button class="btn primary" id="buy-deploy">Deploy ▶</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
   // ------------------------------------------------------------------- bind
   private bind() {
     const click = (id: string, fn: () => void) => {
@@ -352,6 +402,14 @@ export class UI {
 
     click('go-again', () => this.handlers.onRestart());
     click('go-menu', () => this.handlers.onQuitToMenu());
+
+    click('buy-deploy', () => this.handlers.onDeploy());
+    this.root.querySelectorAll('.buy-item').forEach((it) =>
+      it.addEventListener('click', () => {
+        Audio.uiClick();
+        this.handlers.onBuy((it as HTMLElement).dataset.id!);
+      })
+    );
 
     this.bindSettingsInputs();
   }
@@ -463,6 +521,7 @@ export class UI {
     this.hide('hud');
     this.hide('pause');
     this.hide('gameover');
+    this.hide('buymenu');
     this.hidePanels();
     this.show('menu');
     this.q('hud').classList.remove('live');
@@ -500,6 +559,26 @@ export class UI {
     this.q('scoreboard').classList.toggle('hidden', !show);
   }
 
+  // --------------------------------------------------------------- buy menu
+  showBuyMenu() {
+    this.show('buymenu');
+  }
+  hideBuyMenu() {
+    this.hide('buymenu');
+  }
+  refreshBuyMenu(money: number, primaryId: string | null, secondaryId: string, timeLeft: number) {
+    this.setText('buy-money', String(money));
+    this.setText('buy-timer', String(Math.max(0, timeLeft)));
+    this.root.querySelectorAll<HTMLElement>('.buy-item').forEach((it) => {
+      const id = it.dataset.id!;
+      const def = WEAPON_DEFS[id];
+      const owned = id === primaryId || id === secondaryId;
+      const afford = money >= def.price || owned;
+      it.classList.toggle('owned', owned);
+      it.classList.toggle('cant', !afford);
+    });
+  }
+
   // ------------------------------------------------------------------- HUD
   updateHUD(s: HUDState) {
     this.setText('hp-num', String(Math.ceil(s.health)));
@@ -519,6 +598,10 @@ export class UI {
     for (const n of [1, 2, 3]) {
       this.q('slot-' + n)?.classList.toggle('active', s.slot === n);
     }
+    this.setText('slot-1', '1 ' + s.primaryName);
+    this.setText('slot-2', '2 ' + s.secondaryName);
+    this.setText('slot-3', '3 Knife');
+    this.setText('hud-money', String(s.money));
 
     this.setText('crew-score', String(s.crewScore));
     this.setText('guard-score', String(s.guardScore));

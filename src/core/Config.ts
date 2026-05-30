@@ -6,7 +6,7 @@
 export const GAME = {
   title: 'CLUTCH OPS',
   subtitle: 'BANANA PROTOCOL',
-  build: 'proto-0.1.0',
+  build: 'proto-0.2.0',
 };
 
 export const TEAM = {
@@ -21,7 +21,8 @@ export const TEAM_NAME: Record<TeamId, string> = {
 };
 
 export const ROUND = {
-  freezeTime: 4, // seconds of buy/freeze before live
+  buyTime: 15, // seconds of buy phase before the round goes live
+  freezeTime: 2, // (legacy) brief settle time, mostly unused now
   roundTime: 95, // seconds for the attackers to plant
   plantTime: 3.2, // seconds to plant the Banana Core
   defuseTime: 5.0, // seconds to defuse
@@ -29,6 +30,15 @@ export const ROUND = {
   endDelay: 4.5, // seconds to show the round result
   scoreToWin: 8, // first team to N round wins
   teamSize: 5, // players per team (incl. the human)
+};
+
+// Simple economy for the buy menu. Money persists between rounds.
+export const ECONOMY = {
+  startMoney: 1600,
+  maxMoney: 16000,
+  killReward: 300,
+  winReward: 3250,
+  lossReward: 1900,
 };
 
 export const PLAYER = {
@@ -59,10 +69,12 @@ export const BOT = {
   maxArmor: 60,
 };
 
+// Bot difficulty. Higher aimError + reaction = easier (they miss and react slow).
+// These were deliberately softened so bots feel fair, not aimbotty.
 export const DIFFICULTY = {
-  easy: { aimError: 0.09, reaction: 0.55, aggression: 0.4, fireRateScale: 0.7 },
-  normal: { aimError: 0.045, reaction: 0.35, aggression: 0.6, fireRateScale: 0.85 },
-  hard: { aimError: 0.02, reaction: 0.18, aggression: 0.8, fireRateScale: 1.0 },
+  easy: { aimError: 0.14, reaction: 0.75, aggression: 0.35, fireRateScale: 0.55 },
+  normal: { aimError: 0.08, reaction: 0.5, aggression: 0.55, fireRateScale: 0.78 },
+  hard: { aimError: 0.045, reaction: 0.32, aggression: 0.75, fireRateScale: 1.0 },
 } as const;
 export type DifficultyId = keyof typeof DIFFICULTY;
 
