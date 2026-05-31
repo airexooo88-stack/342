@@ -6,11 +6,12 @@ import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 
 import type { IGameWorld, BulletResult, SoundEvent } from './Types';
 import type { TeamId } from './Config';
-import { ROUND, TEAM_NAME, HITZONE } from './Config';
+import { ROUND, ECONOMY, TEAM_NAME, HITZONE } from './Config';
 import { Settings } from './Settings';
 import { Audio } from './AudioSynth';
 import { Input } from './Input';
 import { clamp } from './MathUtils';
+import { WEAPON_DEFS } from '../weapons/WeaponDefs';
 
 import { CollisionWorld } from '../world/Collision';
 import { WaypointGraph } from '../world/Waypoints';
@@ -65,7 +66,7 @@ export class Game implements IGameWorld {
   private state: GameState = 'loading';
   private _time = 0;
   private lastFrame = 0;
-  private lastPhase: RoundPhase = 'freeze';
+  private lastPhase: RoundPhase = 'buy';
 
   constructor() {
     const canvas = document.getElementById('game-canvas') as HTMLCanvasElement;
@@ -73,6 +74,8 @@ export class Game implements IGameWorld {
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.05;
     this.applyPixelRatio();
 
     this.scene.background = new THREE.Color(0x0a0d14);
@@ -99,6 +102,8 @@ export class Game implements IGameWorld {
       onResume: () => this.resume(),
       onQuitToMenu: () => this.toMenu(),
       onRestart: () => this.startMatch(),
+      onBuy: (id) => this.buyWeapon(id),
+      onDeploy: () => this.deploy(),
     });
 
     this.menuScene = new MenuScene();
@@ -108,6 +113,13 @@ export class Game implements IGameWorld {
 
     window.addEventListener('resize', () => this.onResize());
     Settings.onChange(() => this.applyGraphics());
+
+    // click-to-lock fallback (e.g. after the buy timer expires without Deploy)
+    canvas.addEventListener('mousedown', () => {
+      if (this.state === 'playing' && this.round.phase === 'live' && !this.input.locked) {
+        this.input.requestLock();
+      }
+    });
 
     this.onResize(); // set initial aspect ratios for all cameras
     this.boot();
@@ -198,7 +210,12 @@ export class Game implements IGameWorld {
 
   onKill(victim: Character, attacker: Character | null, weapon: string, headshot: boolean) {
     victim.deaths++;
-    if (attacker && attacker !== victim && attacker.team !== victim.team) attacker.kills++;
+    if (attacker && attacker !== victim && attacker.team !== victim.team) {
+      attacker.kills++;
+      if (attacker === this.player) {
+        this.player.money = Math.min(ECONOMY.maxMoney, this.player.money + ECONOMY.killReward);
+      }
+    }
     this.ui.addKill(
       attacker ? attacker.name : '—',
       (attacker?.team ?? victim.team) as 'crew' | 'guard',
@@ -288,13 +305,16 @@ export class Game implements IGameWorld {
       c.deaths = 0;
       c.assists = 0;
     }
+    this.player.money = ECONOMY.startMoney;
+    this.player.primaryId = null; // pistol round to start; buy a primary
+    this.player.secondaryId = 'click9';
     this.round.startRound(1);
     this.resetPositions();
-    this.lastPhase = 'freeze';
+    this.lastPhase = 'buy';
     this.state = 'playing';
     this.ui.showHUD();
     this.ui.hideRoundBanner();
-    this.input.requestLock();
+    // buy phase opens the armory (onPhaseChange handles the menu + cursor)
   }
 
   private resume() {
@@ -311,25 +331,46 @@ export class Game implements IGameWorld {
   }
 
   private onLockChange(locked: boolean) {
-    if (!locked && this.state === 'playing') this.pause();
+    // Only auto-pause when the mouse is released during the LIVE round.
+    // (The buy phase intentionally frees the cursor for the armory menu.)
+    if (!locked && this.state === 'playing' && this.round.phase === 'live') this.pause();
   }
 
   private resetPositions() {
     const crew = this.alliesOf('crew');
     const guard = this.alliesOf('guard');
+    const rn = this.round.roundNumber;
     // player first on crew
     let ci = 0;
     for (const c of crew) {
       const spawn = CREW_SPAWNS[ci % CREW_SPAWNS.length];
+      if (c.isBot) this.assignBotLoadout(c as Bot, rn);
       c.resetForRound(spawn.clone(), 0); // face -Z (toward defenders)
       ci++;
     }
     let gi = 0;
     for (const g of guard) {
       const spawn = GUARD_SPAWNS[gi % GUARD_SPAWNS.length];
+      if (g.isBot) this.assignBotLoadout(g as Bot, rn);
       g.resetForRound(spawn.clone(), Math.PI); // face +Z (toward attackers)
       gi++;
     }
+  }
+
+  /** Give bots a role/round-based loadout (round 1 = pistol round). */
+  private assignBotLoadout(bot: Bot, roundNumber: number) {
+    let primary: string | null;
+    if (roundNumber <= 1) {
+      primary = Math.random() < 0.25 ? 'buzz9' : null; // mostly pistols round 1
+    } else if (bot.role === 'sniper') {
+      primary = Math.random() < 0.7 ? 'longscope' : 'spray47';
+    } else if (bot.role === 'support') {
+      primary = Math.random() < 0.5 ? 'buzz9' : 'spray47';
+    } else {
+      primary = Math.random() < 0.2 ? 'thumper' : 'spray47';
+    }
+    bot.primaryId = primary;
+    bot.secondaryId = Math.random() < 0.2 ? 'handCannon' : 'click9';
   }
 
   private nextRound() {
@@ -342,6 +383,54 @@ export class Game implements IGameWorld {
   // =============================================================== events ==
   private onPhaseChange(p: RoundPhase) {
     this.lastPhase = p;
+    if (p === 'buy') {
+      // open the armory: free the cursor so weapons are clickable
+      this.input.exitLock();
+      this.ui.showBuyMenu();
+      this.refreshBuyMenu();
+    } else if (p === 'live') {
+      this.ui.hideBuyMenu();
+      this.ui.centerHint(null);
+      // re-grab the mouse for the live round
+      this.input.requestLock();
+    }
+  }
+
+  private buyWeapon(id: string) {
+    if (this.round.phase !== 'buy') return;
+    const def = WEAPON_DEFS[id];
+    if (!def) return;
+    const p = this.player;
+    if (def.slotKind === 'primary') {
+      if (p.primaryId === id) return; // already owned
+      if (p.money < def.price) return;
+      p.money -= def.price;
+      p.setLoadout(id, p.secondaryId);
+    } else if (def.slotKind === 'secondary') {
+      if (p.secondaryId === id) return;
+      if (p.money < def.price) return;
+      p.money -= def.price;
+      p.setLoadout(p.primaryId, id);
+    } else {
+      return;
+    }
+    p.applyViewmodel();
+    Audio.uiClick();
+    this.refreshBuyMenu();
+  }
+
+  private deploy() {
+    if (this.round.phase !== 'buy') return;
+    this.round.deployNow(); // triggers onPhaseChange('live') -> lock + hide menu
+  }
+
+  private refreshBuyMenu() {
+    this.ui.refreshBuyMenu(
+      this.player.money,
+      this.player.primaryId,
+      this.player.secondaryId,
+      Math.ceil(this.round.timer)
+    );
   }
 
   private onPlanted(site: 'A' | 'B') {
@@ -354,6 +443,11 @@ export class Game implements IGameWorld {
 
   private onRoundEnd(winner: TeamId, reason: WinReason) {
     const playerWon = winner === this.player.team;
+    // economy reward for the next buy
+    this.player.money = Math.min(
+      ECONOMY.maxMoney,
+      this.player.money + (playerWon ? ECONOMY.winReward : ECONOMY.lossReward)
+    );
     const reasonText: Record<WinReason, string> = {
       eliminated: 'Team eliminated',
       detonated: 'Banana Core detonated',
@@ -391,6 +485,7 @@ export class Game implements IGameWorld {
 
   private simulate(dt: number) {
     // entities
+    this.player.frozen = this.round.phase === 'buy';
     this.player.update(dt);
     for (const b of this.bots) b.update(dt);
 
@@ -400,6 +495,9 @@ export class Game implements IGameWorld {
 
     this._fx.update(dt);
     this.map.update(this._time);
+
+    // keep the buy timer / affordability fresh during the buy phase
+    if (this.round.phase === 'buy') this.refreshBuyMenu();
 
     // round flow transitions
     if (this.round.matchOver && this.round.phase === 'end' && this.roundEndElapsed()) {
@@ -439,7 +537,16 @@ export class Game implements IGameWorld {
     const guardAlive = this.alliesOf('guard').filter((c) => c.alive).length;
 
     const phaseLabel =
-      this.round.phase === 'freeze' ? 'FREEZE' : this.round.planted ? 'CORE LIVE' : this.round.phase === 'end' ? 'ROUND END' : 'LIVE';
+      this.round.phase === 'buy'
+        ? 'BUY'
+        : this.round.planted
+          ? 'CORE LIVE'
+          : this.round.phase === 'end'
+            ? 'ROUND END'
+            : 'LIVE';
+
+    const primaryName = this.player.primaryId ? WEAPON_DEFS[this.player.primaryId].name : '—';
+    const secondaryName = WEAPON_DEFS[this.player.secondaryId]?.name ?? 'Pistol';
 
     this.ui.updateHUD({
       health: this.player.health,
@@ -450,6 +557,9 @@ export class Game implements IGameWorld {
       isMelee: w.isMelee,
       reloading: w.reloading,
       slot: w.def.slot,
+      primaryName,
+      secondaryName,
+      money: this.player.money,
       crewScore: this.round.crewScore,
       guardScore: this.round.guardScore,
       crewAlive,
@@ -504,7 +614,7 @@ export class Game implements IGameWorld {
 
   private objectiveText(): string {
     const atkr = this.player.team === 'crew';
-    if (this.round.phase === 'freeze') return 'Freeze time — get ready';
+    if (this.round.phase === 'buy') return 'Buy phase — pick your loadout & Deploy';
     if (this.round.planted) {
       return atkr ? 'Defend the Banana Core until detonation' : 'Defuse the Banana Core — hurry!';
     }
@@ -532,7 +642,8 @@ export class Game implements IGameWorld {
       return;
     }
 
-    const useBloom = this.composer && Settings.get().bloom && Settings.get().graphics === 'high';
+    const g = Settings.get().graphics;
+    const useBloom = this.composer && Settings.get().bloom && (g === 'high' || g === 'ultra');
     if (useBloom && this.composer) {
       this.composer.render();
     } else {
@@ -551,13 +662,18 @@ export class Game implements IGameWorld {
   // =============================================================== misc ====
   private applyPixelRatio() {
     const g = Settings.get().graphics;
-    const cap = g === 'high' ? 2 : g === 'medium' ? 1.5 : 1;
+    const cap = g === 'ultra' ? 2.5 : g === 'high' ? 2 : g === 'medium' ? 1.5 : 1;
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, cap));
   }
 
   private applyGraphics() {
     const s = Settings.get();
     this.renderer.shadowMap.enabled = s.shadows && s.graphics !== 'low';
+    this.renderer.toneMappingExposure = s.graphics === 'ultra' ? 1.15 : 1.05;
+    if (this.bloomPass) {
+      this.bloomPass.strength = s.graphics === 'ultra' ? 0.8 : 0.5;
+      this.bloomPass.radius = s.graphics === 'ultra' ? 0.7 : 0.5;
+    }
     this.applyPixelRatio();
   }
 

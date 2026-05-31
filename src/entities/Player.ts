@@ -30,6 +30,8 @@ export class Player extends Character {
   feedback: PlayerFeedback = {};
 
   ads = false;
+  frozen = false; // true during buy phase (can look, can't move/shoot)
+  money = 0;
   private recoilYaw = 0;
   private recoilPitch = 0;
   private targetFov: number;
@@ -195,36 +197,54 @@ export class Player extends Character {
     this.eyePosition(_eye);
     this.viewDirection(_dir);
 
-    // apply random spread cone
-    if (spread > 0) {
-      _tmp.set((Math.random() - 0.5), (Math.random() - 0.5), (Math.random() - 0.5));
-      _dir.addScaledVector(_tmp, spread).normalize();
-    }
-
-    const res = this.world.fireBullet(_eye, _dir, this, def);
-
-    // muzzle position ~ slightly forward of eye
-    _muzzle.copy(_eye).addScaledVector(_dir, 0.4);
-
     if (def.type === 'knife') {
+      const res = this.world.fireBullet(_eye, _dir, this, def);
       Audio.knifeSwing();
-      if (res.hitCharacter) Audio.knifeHit();
-    } else {
-      this.world.fx.spawnTracer(_muzzle, res.point);
-      this.world.fx.spawnMuzzleFlash(_muzzle, _dir);
-      if (def.type === 'rifle') Audio.shootRifle(0);
-      else Audio.shootPistol(0);
+      if (res.hitCharacter) {
+        Audio.knifeHit();
+        this.world.fx.spawnBlood(res.point, res.normal);
+        Audio.hitMarker();
+        this.feedback.onHitConfirm?.(!res.hitCharacter.alive, res.zone === 'head');
+      } else if (res.hitWorld) {
+        this.world.fx.spawnImpact(res.point, res.normal);
+      }
+      this.viewmodel.onFire(def);
+      return;
     }
 
-    if (res.hitWorld && !res.hitCharacter) {
-      this.world.fx.spawnImpact(res.point, res.normal);
+    const pellets = def.pellets ?? 1;
+    let anyHit = false;
+    let anyKill = false;
+    let anyHead = false;
+    const base = _dir.clone();
+
+    for (let i = 0; i < pellets; i++) {
+      _dir.copy(base);
+      if (spread > 0) {
+        _tmp.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5);
+        _dir.addScaledVector(_tmp, spread).normalize();
+      }
+      const res = this.world.fireBullet(_eye, _dir, this, def);
+      _muzzle.copy(_eye).addScaledVector(_dir, 0.4);
+      this.world.fx.spawnTracer(_muzzle, res.point);
+      if (res.hitCharacter) {
+        this.world.fx.spawnBlood(res.point, res.normal);
+        anyHit = true;
+        if (!res.hitCharacter.alive) anyKill = true;
+        if (res.zone === 'head') anyHead = true;
+      } else if (res.hitWorld) {
+        this.world.fx.spawnImpact(res.point, res.normal);
+      }
     }
-    if (res.hitCharacter) {
-      this.world.fx.spawnBlood(res.point, res.normal);
-      const killed = !res.hitCharacter.alive;
-      const head = res.zone === 'head';
+
+    // one muzzle flash + audio per trigger pull
+    _muzzle.copy(_eye).addScaledVector(base, 0.4);
+    this.world.fx.spawnMuzzleFlash(_muzzle, base);
+    this.playShootAudio(def.type);
+
+    if (anyHit) {
       Audio.hitMarker();
-      this.feedback.onHitConfirm?.(killed, head);
+      this.feedback.onHitConfirm?.(anyKill, anyHead);
     }
 
     this.viewmodel.onFire(def);
@@ -232,7 +252,14 @@ export class Player extends Character {
     this.recoilPitch += kickPitch;
     this.recoilYaw += kickYaw;
     this.shakeT = 0.08;
-    this.shakeMag = def.type === 'rifle' ? 0.012 : 0.008;
+    this.shakeMag = def.type === 'sniper' ? 0.02 : def.type === 'shotgun' ? 0.018 : def.type === 'rifle' ? 0.012 : 0.008;
+  }
+
+  private playShootAudio(type: string) {
+    if (type === 'shotgun') Audio.shootShotgun(0);
+    else if (type === 'sniper') Audio.shootSniper(0);
+    else if (type === 'pistol') Audio.shootPistol(0);
+    else Audio.shootRifle(0);
   }
 
   /** View direction including recoil offset (used for shots + camera). */
@@ -251,10 +278,29 @@ export class Player extends Character {
     Audio.hitFlesh();
   }
 
+  /** Re-sync the viewmodel to the currently selected weapon (after buying). */
+  applyViewmodel() {
+    this.viewmodel.setWeapon(this.weapon.def);
+  }
+
   update(dt: number) {
     if (!this.alive) {
       // keep camera where the player died, slightly raised (spectate self)
       this.updateCamera(dt, true);
+      return;
+    }
+
+    if (this.frozen) {
+      // buy phase: allow looking around but no movement/shooting
+      this.handleLook();
+      this.weapon.update(dt);
+      this.updateCamera(dt, false);
+      this.viewmodel.update(dt, {
+        moveSpeed: 0,
+        ads: false,
+        reloadProgress: this.weapon.reloadProgress,
+        isMelee: this.weapon.isMelee,
+      });
       return;
     }
 
@@ -282,9 +328,9 @@ export class Player extends Character {
     this.eyePosition(_eye);
     this.camera.position.copy(_eye);
 
-    // FOV: narrow slightly when ADS
+    // FOV: zoom in when ADS (amount depends on the weapon — snipers zoom hard)
     const baseFov = Settings.get().fov;
-    this.targetFov = this.ads ? baseFov * 0.8 : baseFov;
+    this.targetFov = this.ads ? baseFov * (this.weapon.def.adsZoom ?? 0.8) : baseFov;
     this.currentFov = damp(this.currentFov, this.targetFov, 12, dt);
     this.camera.fov = this.currentFov;
     this.camera.updateProjectionMatrix();

@@ -101,6 +101,22 @@ class AudioSynth {
     this.noise(0.08, v * 0.7, 2200, 0.8);
   }
 
+  shootShotgun(distance = 0) {
+    const v = this.dist(0.65, distance);
+    if (v <= 0.001) return;
+    this.tone(220, 60, 0.16, v, 'sawtooth');
+    this.noise(0.22, v, 900, 0.5);
+    this.noise(0.1, v * 0.6, 2600, 0.8);
+  }
+
+  shootSniper(distance = 0) {
+    const v = this.dist(0.75, distance);
+    if (v <= 0.001) return;
+    this.tone(700, 70, 0.14, v, 'sawtooth');
+    this.noise(0.18, v * 0.9, 1400, 0.6);
+    this.tone(160, 50, 0.3, v * 0.5, 'sine');
+  }
+
   knifeSwing() {
     this.noise(0.16, 0.3, 1200, 0.5);
   }

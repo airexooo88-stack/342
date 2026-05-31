@@ -1,6 +1,6 @@
 import type { DifficultyId } from './Config';
 
-export type GraphicsQuality = 'low' | 'medium' | 'high';
+export type GraphicsQuality = 'low' | 'medium' | 'high' | 'ultra';
 
 export interface GameSettings {
   sensitivity: number; // mouse sensitivity multiplier

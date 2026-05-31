@@ -6,7 +6,7 @@ import type { Character } from '../entities/Character';
 import type { Player } from '../entities/Player';
 import { SITE_A, SITE_B, SITE_RADIUS } from '../world/Layout';
 
-export type RoundPhase = 'freeze' | 'live' | 'end';
+export type RoundPhase = 'buy' | 'live' | 'end';
 export type WinReason = 'eliminated' | 'detonated' | 'defused' | 'timeout';
 
 export interface RoundEvents {
@@ -22,8 +22,8 @@ export interface RoundEvents {
  * detonate; Null Guards (defenders) try to defend or defuse.
  */
 export class Round {
-  phase: RoundPhase = 'freeze';
-  timer = ROUND.freezeTime;
+  phase: RoundPhase = 'buy';
+  timer = ROUND.buyTime;
   roundNumber = 1;
 
   crewScore = 0;
@@ -83,8 +83,8 @@ export class Round {
 
   startRound(roundNumber: number) {
     this.roundNumber = roundNumber;
-    this.phase = 'freeze';
-    this.timer = ROUND.freezeTime;
+    this.phase = 'buy';
+    this.timer = ROUND.buyTime;
     this.planted = false;
     this.site = null;
     this.pos = null;
@@ -95,7 +95,19 @@ export class Round {
     this.planting = false;
     this.core.visible = false;
     this.endTimer = 0;
-    this.events.onPhase?.('freeze');
+    this.events.onPhase?.('buy');
+  }
+
+  /** Transition from the buy phase into the live round. */
+  private goLive() {
+    this.phase = 'live';
+    this.timer = ROUND.roundTime;
+    this.events.onPhase?.('live');
+  }
+
+  /** Player pressed Deploy — skip remaining buy time. */
+  deployNow() {
+    if (this.phase === 'buy') this.goLive();
   }
 
   private inSiteZone(p: THREE.Vector3): 'A' | 'B' | null {
@@ -117,13 +129,9 @@ export class Round {
   }
 
   update(dt: number, characters: Character[], player: Player, holdingE: boolean) {
-    if (this.phase === 'freeze') {
+    if (this.phase === 'buy') {
       this.timer -= dt;
-      if (this.timer <= 0) {
-        this.phase = 'live';
-        this.timer = ROUND.roundTime;
-        this.events.onPhase?.('live');
-      }
+      if (this.timer <= 0) this.goLive();
       return;
     }
 
